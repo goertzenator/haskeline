@@ -9,6 +9,7 @@ module System.Console.Haskeline.Backend.Posix (
                         mapLines,
                         stdinTTYHandles,
                         ttyHandles,
+                        explicitTTYHandles,
                         posixRunTerm,
                         fileRunTerm
                  ) where
@@ -238,8 +239,8 @@ getEvent h baseMap = keyEventLoop $ do
 -- Read at least one character of input, and more if immediately
 -- available.  If an ESC character is seen, timeout mode is
 -- activated to prevent control sequences from being broken across
--- getBlockofChars calls.  A timeout of 10ms is chosen to work well
--- down to 1200baud while still providing decent response times.
+-- getBlockofChars calls.  A timeout of 20ms was shown to work
+-- well with a 9600bps serial port.
 
 getBlockOfChars :: Handle -> IO String
 getBlockOfChars h = do
@@ -254,14 +255,13 @@ getBlockOfChars h = do
         maybeC <- do
             isReady <- hReady h
             case (timeout, isReady) of
-                -- fast new character case
-                (_, True) -> Just <$> hGetChar h
-                -- wait up to 10ms for next char
-                (True, False) ->
+                (_, True) -> do -- fast new character case
+                    Just <$> hGetChar h
+                (True, False) -> -- wait up to 20ms for next char
                     runConcurrently $ Concurrently (Just <$> hGetChar h)
-                                  <|> Concurrently (threadDelay 10000 $> Nothing)
-                -- no new char and timeout mode has not been triggered
-                (False, False) -> pure Nothing
+                                  <|> Concurrently (threadDelay 20000 $> Nothing)
+                (False, False) -> -- no new char and timeout mode has not been triggered
+                    pure Nothing
         case maybeC of
             Just c -> loop c cs timeout
             Nothing -> pure $ reverse cs
@@ -293,6 +293,15 @@ openTerm :: IOMode -> MaybeT IO ExternalHandle
 openTerm mode = handle (\(_::IOException) -> mzero)
             $ liftIO $ openInCodingMode "/dev/tty" mode
 
+explicitTTYHandles :: Handle -> Handle -> MaybeT IO Handles
+explicitTTYHandles h_in h_out = do
+    isInTerm <- liftIO $ hIsTerminalDevice h_in
+    guard isInTerm
+    return Handles
+            { hIn = externalHandle h_in
+            , hOut = externalHandle h_out
+            , closeHandles = return ()
+            }
 
 posixRunTerm ::
     Handles
