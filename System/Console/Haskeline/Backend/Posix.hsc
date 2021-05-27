@@ -22,6 +22,9 @@ import Control.Monad
 import Control.Monad.Catch (MonadMask, handle, finally)
 import Control.Concurrent.STM
 import Control.Concurrent hiding (throwTo)
+import Control.Concurrent.Async (runConcurrently, Concurrently(..))
+import Control.Applicative ((<|>))
+import Data.Functor (($>))
 import Data.Maybe (catMaybes)
 import System.Posix.Signals.Exts
 import System.Posix.Types(Fd(..))
@@ -233,21 +236,35 @@ getEvent h baseMap = keyEventLoop $ do
         return [KeyInput $ lexKeys baseMap cs]
 
 -- Read at least one character of input, and more if immediately
--- available.  In particular the characters making up a control sequence
--- will all be available at once, so they can be processed together
--- (with Posix.lexKeys).
+-- available.  If an ESC character is seen, timeout mode is
+-- activated to prevent control sequences from being broken across
+-- getBlockofChars calls.  A timeout of 10ms is chosen to work well
+-- down to 1200baud while still providing decent response times.
+
 getBlockOfChars :: Handle -> IO String
 getBlockOfChars h = do
     c <- hGetChar h
-    loop [c]
-  where
-    loop cs = do
-        isReady <- hReady h
-        if not isReady
-            then return $ reverse cs
-            else do
-                    c <- hGetChar h
-                    loop (c:cs)
+    loop c [] False
+    where
+    loop :: Char -> String -> Bool -> IO String
+    loop c' cs' timeout' = do
+        let
+            timeout = timeout' || (c' == '\ESC')
+            cs = (c':cs')
+        maybeC <- do
+            isReady <- hReady h
+            case (timeout, isReady) of
+                -- fast new character case
+                (_, True) -> Just <$> hGetChar h
+                -- wait up to 10ms for next char
+                (True, False) ->
+                    runConcurrently $ Concurrently (Just <$> hGetChar h)
+                                  <|> Concurrently (threadDelay 10000 $> Nothing)
+                -- no new char and timeout mode has not been triggered
+                (False, False) -> pure Nothing
+        case maybeC of
+            Just c -> loop c cs timeout
+            Nothing -> pure $ reverse cs
 
 stdinTTYHandles, ttyHandles :: MaybeT IO Handles
 stdinTTYHandles = do
